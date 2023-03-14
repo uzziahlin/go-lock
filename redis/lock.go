@@ -5,6 +5,9 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -24,26 +27,36 @@ const (
 )
 
 type Lock struct {
+	// redis客户端
 	client Client
 	// 锁的唯一标识，防止误删锁
 	Id string
 	// 锁的名字
-	Name       string
+	Name string
+	// 锁的过期时间，默认为30秒
 	ExpireTime time.Duration
 	// 表示是否开启了看门狗机制
 	hasDog uint32
-
+	// 通知看门狗退出
 	doneC chan struct{}
 }
 
 type LockOption func(lock *Lock)
 
-func NewLock(opts ...LockOption) *Lock {
+func WithClient(client Client) LockOption {
+	return func(lock *Lock) {
+		lock.client = client
+	}
+}
 
-	client := NewDefaultClient()
+func NewLock(name string, opts ...LockOption) *Lock {
+
+	client := NewDefaultClient(&redis.Options{})
 
 	res := &Lock{
+		Name:   name,
 		client: client,
+		Id:     uuid.New().String(),
 	}
 
 	for _, opt := range opts {
@@ -65,6 +78,10 @@ func (l *Lock) Lock(ctx context.Context) error {
 		expireTime = 30 * time.Second.Milliseconds()
 	}
 
+	once := sync.Once{}
+
+	var sub <-chan Sub
+
 	for {
 		res := l.client.Eval(ctx, lockScript, []string{l.Name}, l.Id, expireTime)
 
@@ -72,8 +89,10 @@ func (l *Lock) Lock(ctx context.Context) error {
 			return res.Err
 		}
 
+		val := res.Val.(int64)
+
 		// 如果val == nil 说明已经拿到锁了
-		if res.Val == nil {
+		if val == -1 {
 
 			// 如果用户没有设置过期时间则开启看门狗机制
 			if l.ExpireTime == 0 && atomic.LoadUint32(&l.hasDog) == 0 {
@@ -85,14 +104,17 @@ func (l *Lock) Lock(ctx context.Context) error {
 			return nil
 		}
 
-		sub := l.Subscribe(ctx)
+		// 保证只订阅一次
+		once.Do(func() {
+			sub = l.Subscribe(ctx)
+		})
 
 		select {
 		case v := <-sub:
 			if v.Err != nil {
 				return v.Err
 			}
-		case <-time.After(time.Duration(res.Val.(int64)) * time.Millisecond):
+		case <-time.After(time.Duration(val) * time.Millisecond):
 		case <-ctx.Done():
 			return ctx.Err()
 		}

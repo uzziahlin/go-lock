@@ -1,4 +1,4 @@
-package go_lock
+package lock
 
 import (
 	"context"

@@ -33,7 +33,7 @@ type Pong struct {
 
 type Client interface {
 	Eval(ctx context.Context, script string, keys []string, val ...any) *Result
-	Subscribe(ctx context.Context, channels ...any) (chan any, error)
+	Subscribe(ctx context.Context, channels ...string) (chan any, error)
 }
 
 type Result struct {
@@ -46,18 +46,64 @@ type DefaultClient struct {
 }
 
 func (d DefaultClient) Eval(ctx context.Context, script string, keys []string, val ...any) *Result {
-	//TODO implement me
-	panic("implement me")
+
+	res, err := d.client.Eval(ctx, script, keys, val).Result()
+
+	return &Result{
+		Val: res,
+		Err: err,
+	}
 }
 
-func (d DefaultClient) Subscribe(ctx context.Context, channels ...any) (chan any, error) {
-	//TODO implement me
-	panic("implement me")
+func (d DefaultClient) Subscribe(ctx context.Context, channels ...string) (chan any, error) {
+	res := make(chan any)
+
+	sub := d.client.Subscribe(ctx, channels...)
+
+	go func() {
+		for {
+			receive, err := sub.Receive(ctx)
+			if err != nil {
+				res <- err
+				return
+			}
+			switch v := receive.(type) {
+			case redis.Subscription:
+				res <- Subscription{
+					Kind:    v.Kind,
+					Channel: v.Channel,
+					Count:   v.Count,
+				}
+			case redis.Message:
+				res <- Message{
+					Channel: v.Channel,
+					Pattern: v.Pattern,
+					Data:    []byte(v.Payload),
+				}
+				for _, p := range v.PayloadSlice {
+					res <- Message{
+						Channel: v.Channel,
+						Pattern: v.Pattern,
+						Data:    []byte(p),
+					}
+				}
+			case Pong:
+				res <- Pong{
+					Data: v.Data,
+				}
+			case error:
+				res <- v
+			}
+		}
+	}()
+
+	return res, nil
 }
 
-func NewDefaultClient() *DefaultClient {
+func NewDefaultClient(opts *redis.Options) *DefaultClient {
 
 	return &DefaultClient{
-		client: &redis.Client{},
+		client: redis.NewClient(opts),
 	}
+
 }
