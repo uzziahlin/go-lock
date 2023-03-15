@@ -23,11 +23,14 @@ var unlockScript string
 
 var (
 	LockChannelPrefix = "Unlock:"
+	// DefaultExpireTime 锁默认的过期时间，如果用户没有为锁设置过期时间，则用此默认时间
 	DefaultExpireTime = 30 * time.Second
 )
 
+// Lock 实现了核心接口Lock
+// 基于redis的Lock实现，通过Hash类型实现了可重入锁
 type Lock struct {
-	// redis客户端
+	// redis客户端，默认使用DefaultClient实现
 	client Client
 	// 锁的唯一标识，防止误删锁
 	Id string
@@ -80,8 +83,9 @@ func (l *Lock) Lock(ctx context.Context) error {
 
 	expireTime := l.ExpireTime.Milliseconds()
 
+	// 如果用户没有设置过期时间，则设置过期时间为默认过期时间
 	if expireTime == 0 {
-		expireTime = 30 * time.Second.Milliseconds()
+		expireTime = DefaultExpireTime.Milliseconds()
 	}
 
 	once := sync.Once{}
@@ -89,6 +93,7 @@ func (l *Lock) Lock(ctx context.Context) error {
 	var sub <-chan Sub
 
 	for {
+		// 执行加锁lua脚本，如果加锁成功，则返回-1，如果加锁不成功，则返回目前锁的过期时间ttl
 		res := l.client.Eval(ctx, lockScript, []string{l.Name}, l.Id, expireTime)
 
 		if res.Err != nil {
@@ -97,7 +102,7 @@ func (l *Lock) Lock(ctx context.Context) error {
 
 		val := res.Val.(int64)
 
-		// 如果val == nil 说明已经拿到锁了
+		// 如果val == -1 说明已经拿到锁了
 		if val == -1 {
 
 			// 如果用户没有设置过期时间则开启看门狗机制
@@ -112,9 +117,12 @@ func (l *Lock) Lock(ctx context.Context) error {
 
 		// 保证只订阅一次
 		once.Do(func() {
+			// 订阅redis的channel，当用户释放锁时会往该channel写入消息通知其他人锁已经释放了
 			sub = l.Subscribe(ctx)
 		})
 
+		// 有2种情况发生会重新进行抢锁：1.收到channel的释放锁通知 2.阻塞上边获取的redis里该锁的过期时间后
+		// 如果设置了超时时间，则可能会超时
 		select {
 		case v := <-sub:
 			if v.Err != nil {
@@ -132,6 +140,7 @@ type Sub struct {
 	Err error
 }
 
+// Subscribe 订阅redis特定的channel，当channel有特定消息写入时会通过chan返回来
 func (l *Lock) Subscribe(ctx context.Context) <-chan Sub {
 	c := make(chan Sub)
 	go func() {
@@ -173,6 +182,8 @@ func (l *Lock) Unlock(ctx context.Context) error {
 
 	channelName := fmt.Sprintf("%s%s", LockChannelPrefix, l.Name)
 
+	// 执行解锁脚本，解锁是会判断Id和Key对应的field是否一致，防止误删锁
+	// 如果解锁成功，则会往特定channel写入消息，通知其他用户该锁已经释放，可以重新抢锁
 	res := l.client.Eval(ctx, unlockScript, []string{l.Name, channelName}, l.Id, 1)
 
 	if res.Err != nil {
@@ -183,6 +194,8 @@ func (l *Lock) Unlock(ctx context.Context) error {
 
 }
 
+// startWatchDog 当用户没有设置锁过期时间，会自动开启开门狗机制
+// 默认情况下会给锁设置30秒的过期时间，并且三分之一过期时间时会定期检测锁是否还存在，如果存在则会进行锁续约
 func (l *Lock) startWatchDog(ctx context.Context, expireTime time.Duration) {
 	if l.doneC == nil {
 		l.doneC = make(chan struct{})
@@ -210,6 +223,7 @@ func (l *Lock) startWatchDog(ctx context.Context, expireTime time.Duration) {
 	}(expireTime)
 }
 
+// Expire 重置锁的过期时间
 func (l *Lock) Expire(ctx context.Context, expireTime time.Duration) error {
 
 	res := l.client.Eval(ctx, expireScript, []string{l.Name}, l.Id, expireTime.Milliseconds())
