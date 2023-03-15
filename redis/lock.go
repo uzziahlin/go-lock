@@ -21,7 +21,7 @@ var expireScript string
 //go:embed scripts/redis_unlock.lua
 var unlockScript string
 
-const (
+var (
 	LockChannelPrefix = "Unlock:"
 	DefaultExpireTime = 30 * time.Second
 )
@@ -46,6 +46,12 @@ type LockOption func(lock *Lock)
 func WithClient(client Client) LockOption {
 	return func(lock *Lock) {
 		lock.client = client
+	}
+}
+
+func WithExpire(expire time.Duration) LockOption {
+	return func(lock *Lock) {
+		lock.ExpireTime = expire
 	}
 }
 
@@ -138,9 +144,10 @@ func (l *Lock) Subscribe(ctx context.Context) <-chan Sub {
 			select {
 			case val := <-sub:
 				switch v := val.(type) {
-				case Subscription:
-				case Message:
+				case *Subscription:
+				case *Message:
 					c <- Sub{}
+				case *Pong:
 				case error:
 					c <- Sub{Err: v}
 					return

@@ -68,27 +68,27 @@ func (d DefaultClient) Subscribe(ctx context.Context, channels ...string) (chan 
 				return
 			}
 			switch v := receive.(type) {
-			case redis.Subscription:
-				res <- Subscription{
+			case *redis.Subscription:
+				res <- &Subscription{
 					Kind:    v.Kind,
 					Channel: v.Channel,
 					Count:   v.Count,
 				}
-			case redis.Message:
-				res <- Message{
+			case *redis.Message:
+				res <- &Message{
 					Channel: v.Channel,
 					Pattern: v.Pattern,
 					Data:    []byte(v.Payload),
 				}
 				for _, p := range v.PayloadSlice {
-					res <- Message{
+					res <- &Message{
 						Channel: v.Channel,
 						Pattern: v.Pattern,
 						Data:    []byte(p),
 					}
 				}
-			case Pong:
-				res <- Pong{
+			case *Pong:
+				res <- &Pong{
 					Data: v.Data,
 				}
 			case error:

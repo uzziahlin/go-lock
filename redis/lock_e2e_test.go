@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/uzziahlin/go-lock"
+	"sync"
 	"testing"
 	"time"
 )
@@ -22,8 +23,8 @@ type ClientE2ESuite struct {
 
 func (c *ClientE2ESuite) SetupSuite() {
 	c.rdb = NewDefaultClient(&redis.Options{
-		Addr:     "159.75.251.57:6381",
-		Password: "123456",
+		Addr:     "***.***.***.***:6379",
+		Password: "",
 		DB:       0,
 	})
 }
@@ -67,9 +68,13 @@ func (c *ClientE2ESuite) TestLock_Lock() {
 			},
 			before: func(ctx context.Context, l lock.Lock) {
 				l = NewLock("test_lock_timeout", WithClient(rdb))
+				wg := sync.WaitGroup{}
+				wg.Add(1)
 				go func() {
+					defer wg.Done()
 					_ = l.Lock(ctx)
 				}()
+				wg.Wait()
 			},
 			after: func(ctx context.Context, l lock.Lock) {
 				err := l.Unlock(context.Background())
@@ -78,6 +83,86 @@ func (c *ClientE2ESuite) TestLock_Lock() {
 				}
 			},
 			wantErr: context.DeadlineExceeded,
+		},
+		{
+			name: "锁过期，抢锁成功",
+			l: func() lock.Lock {
+				return NewLock("test_lock_deadline", WithClient(rdb))
+			},
+			ctx: func() (context.Context, func()) {
+				return context.WithTimeout(context.Background(), 5*time.Second)
+			},
+			before: func(ctx context.Context, l lock.Lock) {
+				l = NewLock("test_lock_deadline", WithClient(rdb), WithExpire(3*time.Second))
+				wg := sync.WaitGroup{}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_ = l.Lock(ctx)
+				}()
+				wg.Wait()
+			},
+			after: func(ctx context.Context, l lock.Lock) {
+				err := l.Unlock(context.Background())
+				if err != nil {
+					fmt.Println(err)
+				}
+			},
+		},
+		{
+			name: "主动释放锁，抢锁成功",
+			l: func() lock.Lock {
+				return NewLock("test_lock_release", WithClient(rdb))
+			},
+			ctx: func() (context.Context, func()) {
+				return context.WithTimeout(context.Background(), 10*time.Second)
+			},
+			before: func(ctx context.Context, l lock.Lock) {
+				l = NewLock("test_lock_release", WithClient(rdb), WithExpire(30*time.Second))
+				wg := sync.WaitGroup{}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_ = l.Lock(ctx)
+					time.AfterFunc(2*time.Second, func() {
+						_ = l.Unlock(context.Background())
+					})
+				}()
+				wg.Wait()
+			},
+			after: func(ctx context.Context, l lock.Lock) {
+				err := l.Unlock(context.Background())
+				if err != nil {
+					fmt.Println(err)
+				}
+			},
+		},
+		{
+			name: "测试看门狗机制",
+			l: func() lock.Lock {
+				return NewLock("test_lock_watch_dog", WithClient(rdb))
+			},
+			ctx: func() (context.Context, func()) {
+				return context.WithTimeout(context.Background(), 10*time.Second)
+			},
+			before: func(ctx context.Context, l lock.Lock) {
+				DefaultExpireTime = 5 * time.Second
+				l = NewLock("test_lock_watch_dog", WithClient(rdb))
+				wg := sync.WaitGroup{}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_ = l.Lock(ctx)
+				}()
+				wg.Wait()
+			},
+			after: func(ctx context.Context, l lock.Lock) {
+				DefaultExpireTime = 30 * time.Second
+				err := l.Unlock(context.Background())
+				if err != nil {
+					fmt.Println(err)
+				}
+			},
 		},
 	}
 
