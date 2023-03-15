@@ -2,6 +2,12 @@
 
 基于go语言的redis分布式锁实现，使用实例如下：
 ```
+import (
+    "context"
+    redisv9 "github.com/redis/go-redis/v9"
+    "github.com/uzziahlin/go-lock/redis"
+)
+
 var lock Lock
 
 // 实例化redis的client，也可以自己实现redis.Client接口进行注入
